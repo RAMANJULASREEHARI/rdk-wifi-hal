@@ -335,7 +335,8 @@ int platform_get_nasta(INT apIndex, const wifi_na_sta_req_params_t *params, wifi
 
     /* Convert max antenna RSSI to RCPI: (RSSI + 110) * 2, clamped to [0, 220] */
     for (i = 1; i < WAVE_STAT_MAX_ANTENNAS; i++) {
-        if (nasta_info.rssi[i] && (nasta_info.rssi[i] > nasta_info.rssi[0])) {
+        if (nasta_info.rssi[i] &&
+            (!nasta_info.rssi[0] || nasta_info.rssi[i] > nasta_info.rssi[0])) {
             nasta_info.rssi[0] = nasta_info.rssi[i];
         }
     }
@@ -1934,6 +1935,11 @@ int platform_get_radio_caps(wifi_radio_index_t index)
 }
 
 int platform_get_reg_domain(wifi_radio_index_t radioIndex, UINT *reg_domain)
+{
+    return RETURN_OK;
+}
+
+int platform_set_beacon_prot(uint apIndex, bool isEnabled)
 {
     return RETURN_OK;
 }

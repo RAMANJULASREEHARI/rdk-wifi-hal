@@ -148,6 +148,10 @@ int platform_create_vap(wifi_radio_index_t index, wifi_vap_info_map_t *map)
             continue;
         }
 
+        if (!interface->vap_info.u.bss_info.enabled) {
+            continue;
+        }
+
         if (interface->u.ap.conf.disable_11be) {
             continue;
         }
@@ -313,19 +317,30 @@ int platform_pre_create_vap(wifi_radio_index_t index, wifi_vap_info_map_t *map)
     }
     for (i = 0; i < map->num_vaps; i++)
     {
-      if (map->vap_array[i].vap_mode == wifi_vap_mode_ap)
-      {
-	    if ((get_security_mode_support_radius(map->vap_array[i].u.bss_info.security.mode)) || is_wifi_hal_vap_lnf_radius(map->vap_array[i].vap_index) || is_wifi_hal_vap_hotspot_secure(map->vap_array[i].vap_index)) {
-	//   Assigning default radius values
-	    wifi_nvram_defaultRead("radius_s_port",output_val);
-	    map->vap_array[i].u.bss_info.security.u.radius.s_port = atoi(output_val);
-	    map->vap_array[i].u.bss_info.security.u.radius.port = atoi(output_val);
-	    wifi_nvram_defaultRead("radius_s_ip",map->vap_array[i].u.bss_info.security.u.radius.s_ip);
-	    wifi_nvram_defaultRead("radius_s_ip",map->vap_array[i].u.bss_info.security.u.radius.ip);
-	    wifi_nvram_defaultRead("radius_key",map->vap_array[i].u.bss_info.security.u.radius.s_key);
-	    wifi_nvram_defaultRead("radius_key",map->vap_array[i].u.bss_info.security.u.radius.key);
-	    }
-      }
+        if (map->vap_array[i].vap_mode == wifi_vap_mode_ap)
+        {
+            if ((get_security_mode_support_radius(map->vap_array[i].u.bss_info.security.mode)) ||
+                is_wifi_hal_vap_lnf_radius(map->vap_array[i].vap_index) ||
+                is_wifi_hal_vap_hotspot_secure(map->vap_array[i].vap_index)) {
+                /* Set Default Primary RADIUS Configurations if not already configured */
+                if (strcmp(map->vap_array[i].u.bss_info.security.u.radius.ip, "0.0.0.0") == 0) {
+                    wifi_nvram_defaultRead("radius_s_ip",map->vap_array[i].u.bss_info.security.u.radius.ip);
+                    wifi_nvram_defaultRead("radius_s_port",output_val);
+                    map->vap_array[i].u.bss_info.security.u.radius.port = atoi(output_val);
+                    wifi_nvram_defaultRead("radius_key",map->vap_array[i].u.bss_info.security.u.radius.key);
+                }
+                /* Set Default Secondary RADIUS Configurations if not already configured */
+                if (strcmp(map->vap_array[i].u.bss_info.security.u.radius.s_ip, "0.0.0.0") == 0) {
+                    wifi_nvram_defaultRead("radius_s_ip",map->vap_array[i].u.bss_info.security.u.radius.s_ip);
+                    wifi_nvram_defaultRead("radius_s_port",output_val);
+                    map->vap_array[i].u.bss_info.security.u.radius.s_port = atoi(output_val);
+                    wifi_nvram_defaultRead("radius_key",map->vap_array[i].u.bss_info.security.u.radius.s_key);
+                }
+                wifi_hal_dbg_print("%s:%d: Primary RADIUS server IP address:%s Port:%d \n Secondary RADIUS server IP address:%s Port:%d \n",
+                    __func__, __LINE__, map->vap_array[i].u.bss_info.security.u.radius.ip, map->vap_array[i].u.bss_info.security.u.radius.port,
+                    map->vap_array[i].u.bss_info.security.u.radius.s_ip, map->vap_array[i].u.bss_info.security.u.radius.s_port);
+            }
+        }
     }
 
     for (unsigned int i = 0; i < map->num_vaps; i++) {
@@ -341,17 +356,29 @@ int platform_pre_create_vap(wifi_radio_index_t index, wifi_vap_info_map_t *map)
             continue;
         }
 
+        if (interface->vap_info.vap_mode != wifi_vap_mode_ap) {
+            continue;
+        }
+
 #if defined(CONFIG_IEEE80211BE) && defined(CONFIG_GENERIC_MLO)
+        // Prevent modifications of MLD_Addr and link ID
+        memcpy(vap->u.bss_info.mld_info.common_info.mld_addr,
+            interface->vap_info.u.bss_info.mld_info.common_info.mld_addr, sizeof(mac_address_t));
+        vap->u.bss_info.mld_info.common_info.mld_link_id =
+            interface->vap_info.u.bss_info.mld_info.common_info.mld_link_id;
+
         if (has_config_changed(&interface->vap_info, vap) == false ||
             (interface->u.ap.conf.disable_11be == true) ||
             (interface->vap_info.vap_mode != wifi_vap_mode_ap)) {
             continue;
         }
 
+        // Evaluate the current state vs incoming - do not alter incoming mld_enable or VAP enable
+        bool is_mlo_enabled = interface->vap_info.u.bss_info.enabled && wifi_hal_is_mld_enabled(interface);
+        bool should_enable_mlo = vap->u.bss_info.enabled && vap->u.bss_info.mld_info.common_info.mld_enable;
+
         // Verify the incoming params against current MLD state
-        if (wifi_hal_is_mld_enabled(interface) &&
-            (vap->u.bss_info.mld_info.common_info.mld_enable == false ||
-                vap->u.bss_info.enabled == false)) {
+        if (is_mlo_enabled == true && should_enable_mlo == false) {
             if (teardown_mlo_vap(interface) != 0) {
                 wifi_hal_error_print("%s:%d: Failed to teardown link for MLD ID %d on VAP idx %d\n",
                     __func__, __LINE__, vap->u.bss_info.mld_info.common_info.mld_id,
@@ -359,12 +386,30 @@ int platform_pre_create_vap(wifi_radio_index_t index, wifi_vap_info_map_t *map)
                 return -1;
             }
 
+            // Before possibly disabling MLD on interface, get the new first interface.
+            // Currently OneWifi allows for improper config on Bpi where mld_enable is true
+            // even if VAP has been disabled.
+            wifi_interface_info_t *first_interface = wifi_hal_get_first_mld_interface(interface);
+
+            // We need to update data now since at this point vap_info is not yet copied
             interface->vap_info.u.bss_info.mld_info.common_info.mld_enable =
                 vap->u.bss_info.mld_info.common_info.mld_enable;
+            interface->vap_info.u.bss_info.enabled = vap->u.bss_info.enabled;
+            interface->vap_info.u.bss_info.mld_info.common_info.mld_link_id = UNDEFINED_MLD_LINK_ID;
+
+            //TODO: Above order - first getting interface, then changing the mld_enable/enabled values
+            //seems weird but it is important, as wifi_hal_get_first_mld_interface due to its structure
+            //may return invalid value in some cases. Also, Currently NULL here means there was an
+            //error. This function should be reworked in future.
+            if (first_interface == NULL) {
+                 wifi_hal_error_print("%s:%d: Failed to determine first MLD interface for %s\n",
+                     __func__, __LINE__, interface->mld_name);
+                 return -1;
+            }
 
             // Reload to update MLD
-            wifi_interface_info_t *first_interface = wifi_hal_get_first_mld_interface(interface);
-            if (first_interface != NULL && hostapd_mld_is_first_bss(&first_interface->u.ap.hapd)) {
+            if (first_interface->u.ap.hapd.mld != NULL &&
+                hostapd_mld_is_first_bss(&first_interface->u.ap.hapd)) {
                 if (reload_vap_configuration(first_interface) != 0) {
                     wifi_hal_error_print(
                         "%s:%d: Failed to reload VAP configuration for MLD ID %d\n", __func__,
@@ -373,16 +418,21 @@ int platform_pre_create_vap(wifi_radio_index_t index, wifi_vap_info_map_t *map)
                 }
             }
 
-            // Set link_id to NA in DML
-            vap->u.bss_info.mld_info.common_info.mld_link_id = NL80211_DRV_LINK_ID_NA;
-            interface->vap_info.u.bss_info.mld_info.common_info.mld_link_id =
-                NL80211_DRV_LINK_ID_NA;
-            continue;
-        } else if (wifi_hal_is_mld_enabled(interface) == false &&
-            (vap->u.bss_info.mld_info.common_info.mld_enable == true &&
-                vap->u.bss_info.enabled == true)) {
+            // If first interface does not have MLD, then MLD is gone.
+            if (first_interface->u.ap.hapd.mld == NULL) {
+                if (nl80211_interface_enable(interface->mld_name, false) < 0) {
+                    wifi_hal_error_print("%s:%d: Failed to enable MLD interface %s\n", __func__,
+                        __LINE__, interface->mld_name);
+                    return -1;
+                }
+            }
+
+        } else if (is_mlo_enabled == false && should_enable_mlo == true) {
+            // We need to update data now since at this point vap_info is not yet copied
             interface->vap_info.u.bss_info.mld_info.common_info.mld_enable =
                 vap->u.bss_info.mld_info.common_info.mld_enable;
+            interface->vap_info.u.bss_info.enabled = vap->u.bss_info.enabled;
+
             if (setup_mlo_vap(interface, vap) != 0) {
                 wifi_hal_error_print("%s:%d: Failed to setup link for MLD ID %d with VAP idx %d\n",
                     __func__, __LINE__, vap->u.bss_info.mld_info.common_info.mld_id,
@@ -397,12 +447,13 @@ int platform_pre_create_vap(wifi_radio_index_t index, wifi_vap_info_map_t *map)
             }
         }
 
-        // This is feedback info to datamodel on MLD address
+        // Update MLD_Addr and link ID
         memcpy(vap->u.bss_info.mld_info.common_info.mld_addr,
-            interface->vap_info.u.bss_info.mld_info.common_info.mld_addr,
-            sizeof(vap->u.bss_info.mld_info.common_info.mld_addr));
-    }
+            interface->vap_info.u.bss_info.mld_info.common_info.mld_addr, sizeof(mac_address_t));
+        vap->u.bss_info.mld_info.common_info.mld_link_id =
+            interface->vap_info.u.bss_info.mld_info.common_info.mld_link_id;
 #endif // CONFIG_IEEE80211BE && CONFIG_GENERIC_MLO
+    }
     return 0;
 }
 
@@ -532,11 +583,46 @@ int platform_get_radio_caps(wifi_radio_index_t index)
 #if HOSTAPD_VERSION >= 211
     wifi_radio_info_t *radio;
     wifi_interface_info_t *interface;
+    wifi_multi_link_modes_t mld_oper_cap = 0;
+    BOOL tid_negotiation = false;
+    u16 eml_capa = 0, mld_capa_and_ops = 0;
+    unsigned int i;
+    BOOL ap_ext_capa_present = false;
+
     radio = get_radio_by_rdk_index(index);
     if (radio == NULL) {
         wifi_hal_dbg_print("%s:%d failed to get radio for index\n", __func__, __LINE__);
         return RETURN_ERR;
     }
+
+    for (i = 0; i < radio->driver_data.num_iface_ext_capa; i++) {
+        if (radio->driver_data.iface_ext_capa[i].iftype == NL80211_IFTYPE_AP) {
+            ap_ext_capa_present = true;
+            eml_capa = radio->driver_data.iface_ext_capa[i].eml_capa;
+            mld_capa_and_ops = radio->driver_data.iface_ext_capa[i].mld_capa_and_ops;
+            break;
+        }
+    }
+
+    /* Fallback to UNSPECIFIED if AP-specific data is not present */
+    if (!ap_ext_capa_present) {
+        for (i = 0; i < radio->driver_data.num_iface_ext_capa; i++) {
+            if (radio->driver_data.iface_ext_capa[i].iftype == NL80211_IFTYPE_UNSPECIFIED) {
+                eml_capa = radio->driver_data.iface_ext_capa[i].eml_capa;
+                mld_capa_and_ops = radio->driver_data.iface_ext_capa[i].mld_capa_and_ops;
+                break;
+            }
+        }
+    }
+
+    wifi_get_mld_eml_cap(mld_capa_and_ops, eml_capa, &mld_oper_cap, &tid_negotiation);
+
+    if (mld_capa_and_ops || eml_capa) {
+        radio->driver_data.capa.flags2 |= WPA_DRIVER_FLAGS2_MLO;
+    }
+
+    radio->capab.TIDLinkMapNegotiation = tid_negotiation;
+    radio->capab.mldOperationalCap = mld_oper_cap;
 
     for (interface = hash_map_get_first(radio->interface_map); interface != NULL;
         interface = hash_map_get_next(radio->interface_map, interface)) {
@@ -562,6 +648,11 @@ int platform_get_radio_caps(wifi_radio_index_t index)
 }
 
 int platform_get_reg_domain(wifi_radio_index_t radioIndex, UINT *reg_domain)
+{
+    return RETURN_OK;
+}
+
+int platform_set_beacon_prot(uint apIndex, bool isEnabled)
 {
     return RETURN_OK;
 }
@@ -633,7 +724,7 @@ static int get_sta_list(wifi_interface_info_t *interface, sta_list_t *sta_list)
 
 static void set_wifi_standard_from_rate(struct nlattr **rate, char *cli_OperatingStandard)
 {
-#if defined(NL80211_RATE_INFO_EHT_MCS) && defined(CONFIG_IEEE80211BE)
+#if defined(CONFIG_IEEE80211BE)
     if (rate[NL80211_RATE_INFO_EHT_MCS]) {
         snprintf(cli_OperatingStandard, BPI_LEN_64, "be");
     } else
@@ -972,10 +1063,14 @@ int update_hostap_mlo(wifi_interface_info_t *interface)
         return 0;
     }
 
+    hapd = &interface->u.ap.hapd;
+
+    if (hapd->mld == NULL) {
+        return 0;
+    }
+
     wifi_hal_info_print("%s:%d: interface:%s link id:%d update MLD links\n", __func__, __LINE__,
         wifi_hal_get_interface_name(interface), wifi_hal_get_mld_link_id(interface));
-
-    hapd = &interface->u.ap.hapd;
 
     /* Links have been removed due to interface down-up. Re-add all links and enable them,
      * but enable the first link BSS before doing that. */
